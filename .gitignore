@@ -1,0 +1,13 @@
+# Datasets (downloaded by torchvision)
+data/
+*.tar.gz
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store

@@ -1,0 +1,315 @@
+% Based on template for ICASSP-2010 paper; to be used with:
+%          02456.sty  - 02456 LaTeX style file adapted from ICASSP
+\documentclass{article}
+\usepackage{amsmath,graphicx,02456}
+\usepackage{booktabs}
+
+% Load hyperref *after* most other packages
+\usepackage[colorlinks=true,
+            linkcolor=blue,
+            citecolor=blue,
+            urlcolor=blue]{hyperref}
+
+
+\toappear{02456 Deep Learning, DTU Compute, Fall 2025}
+
+% -------------------------------------------------------------------------
+% Title and author
+% -------------------------------------------------------------------------
+\title{Quantitative Class Separation Metrics for Hidden Representations in Deep Neural Networks}
+
+\name{%
+  \begin{tabular}{c}
+    Bashar Bdewi (s183356)
+  \end{tabular}
+}
+\address{}
+
+\begin{document}
+\maketitle
+
+% -------------------------------------------------------------------------
+\begin{abstract}
+Deep neural networks are usually evaluated using external metrics such as accuracy and loss, and---at best---with qualitative visualizations such as t-SNE plots of embeddings. These tools provide limited and often noisy insight into how well hidden layers organize class information. In this project, we propose a small, supervised toolbox of quantitative \emph{class separation} metrics that can be applied layer-wise to hidden representations of trained networks. Inspired by Fisher's discriminant analysis and clustering indices, we define three scores: a Fisher-like scatter ratio, a centroid margin ratio, and a supervised silhouette-style score. We implement these metrics in a reusable Python module and apply them to convolutional networks trained on MNIST and CIFAR-10. The metrics correlate with dataset difficulty, track the evolution of representation quality over training, and reveal early signs of overfitting through train--test divergence in the representation space. This suggests that simple numeric separation scores can serve as lightweight diagnostic tools for explainable deep learning.
+\end{abstract}
+
+% -------------------------------------------------------------------------
+\section{Introduction}
+\label{sec:intro}
+
+Modern deep learning models achieve impressive accuracy on vision benchmarks, but understanding \emph{how} they organize information internally remains challenging \cite{goodfellow2016deep}. Practitioners commonly inspect 2D projections of embeddings (e.g.\ t-SNE or UMAP) to qualitatively judge whether classes look ``well separated''. While visually appealing, such plots are sensitive to hyperparameters, stochasticity, and human interpretation.
+
+Classical statistics already provides quantitative notions of class separation, for example Fisher's linear discriminant criterion, which compares between-class and within-class scatter \cite{fisher1936}. In unsupervised settings, clustering indices such as the silhouette score offer numeric separation measures without labels \cite{rousseeuw1987}. Recent work on linear probes shows that the geometry of hidden representations across layers is informative about model behaviour and feature quality \cite{alain2017linearprobes}. However, there is no simple, supervised, architecture-agnostic toolbox for measuring class separation in arbitrary hidden layers of deep networks.
+
+The goal of this project is to design and empirically study a small family of such metrics. We aim for scores that:
+(i) are easy to implement on top of common frameworks such as PyTorch \cite{paszke2019pytorch};
+(ii) work for any model that exposes hidden representations;
+(iii) can be monitored during training to diagnose overfitting or failure modes.
+
+% -------------------------------------------------------------------------
+\section{Method}
+\label{sec:method}
+
+\subsection{Datasets and models}
+\label{ssec:data_models}
+
+We consider two standard image classification benchmarks.
+
+\textbf{MNIST} is a dataset of $28 \times 28$ grayscale images of handwritten digits (10 classes, 60\,000 training and 10\,000 test examples) \cite{lecun1998mnist}.  
+\textbf{CIFAR-10} contains $32 \times 32$ colour images across 10 object categories, with 50\,000 training and 10\,000 test examples \cite{krizhevsky2009learning}.
+
+For MNIST we train a small CNN with two convolutional layers followed by max-pooling and a two-layer fully connected head. For CIFAR-10 we use a slightly larger CNN with three convolutional blocks before the linear classifier. Both models are trained in PyTorch using cross-entropy loss and the Adam optimizer \cite{paszke2019pytorch}. Hyperparameters (batch size, learning rate, weight decay, number of epochs) are kept simple rather than optimised, as the focus is on representation analysis rather than state-of-the-art accuracy.
+
+\subsection{Hidden representations and layer selection}
+\label{ssec:hidden}
+
+Given a trained model and an input batch, we extract the activations of a chosen hidden layer and flatten them into vectors $z_i \in \mathbb{R}^d$. For convolutional layers we flatten the $(C,H,W)$ tensor into a length-$d$ vector; for fully connected layers we take the activations before the final classifier logits.
+
+Inspired by the practice of linear probes \cite{alain2017linearprobes}, we focus primarily on the \emph{penultimate} fully connected layer, which is often used as a feature embedding. To avoid hard-coding layer names, we programmatically scan the model and select the last \texttt{nn.Linear} layer before the final classifier, which makes the procedure robust across architectures.
+
+For each dataset we collect a matrix $Z \in \mathbb{R}^{N \times d}$ of embeddings and the corresponding labels $y \in \{1,\dots,K\}^N$ for either the whole test set (layer-wise analysis) or for a subset of batches (epoch-wise tracking).
+
+\subsection{Class separation metrics}
+\label{ssec:metrics}
+
+We implement three supervised class-separation metrics.
+
+\subsubsection{Fisher-like scatter ratio}
+
+Let $\mu_k$ be the mean embedding of class $k$ with $N_k$ samples, and let $\mu$ be the global mean of all embeddings. We define a sample-weighted between-class scatter
+\begin{equation}
+  S_B = \sum_{k=1}^K N_k \, \|\mu_k - \mu\|_2^2,
+\end{equation}
+and a within-class scatter
+\begin{equation}
+  S_W = \sum_{k=1}^K \sum_{i: y_i = k} \|z_i - \mu_k\|_2^2.
+\end{equation}
+The \emph{Fisher-like ratio} is then
+\begin{equation}
+  J_{\text{Fisher}} = \frac{S_B}{S_W + \varepsilon},
+\end{equation}
+where a small $\varepsilon$ ensures numerical stability. This mirrors the spirit of Fisher's discriminant analysis \cite{fisher1936} but avoids matrix inverses, making it robust in high dimensions and directly aligned with our implementation.
+
+\subsubsection{Centroid margin ratio}
+
+We first compute the centroid of each class $\mu_k$ and the Euclidean distances between centroids $d_{k\ell} = \|\mu_k - \mu_\ell\|_2$. The global inter-class separation is measured as the mean pairwise distance between centroids
+\begin{equation}
+  m_{\text{inter}} = \frac{1}{K(K-1)} \sum_{k \neq \ell} d_{k\ell}.
+\end{equation}
+For intra-class spread we use the mean distance to the centroid inside each class,
+\begin{equation}
+  m_{\text{intra}} = \frac{1}{K} \sum_{k=1}^K
+  \frac{1}{N_k} \sum_{i: y_i = k} \|z_i - \mu_k\|_2 .
+\end{equation}
+The centroid margin ratio is then
+\begin{equation}
+  J_{\text{centroid}} = \frac{m_{\text{inter}}}{m_{\text{intra}} + \varepsilon}.
+\end{equation}
+Intuitively, it is large when class centroids are, on average, far apart relative to their typical radius. This matches the implementation where we compute the mean pairwise centroid distance divided by the mean intra-class distance.
+
+\subsubsection{Supervised silhouette score}
+
+The classical silhouette coefficient compares each point's average distance to points from its own cluster with the minimum average distance to other clusters \cite{rousseeuw1987}. We adapt this idea to the supervised setting by using true labels as clusters.
+
+For each point $z_i$ we compute:
+\begin{itemize}
+  \item $a_i$: mean distance from $z_i$ to points of the same class,
+  \item $b_i$: minimum over other classes of the mean distance from $z_i$ to that class.
+\end{itemize}
+The silhouette for point $i$ is
+\begin{equation}
+  s_i = \frac{b_i - a_i}{\max(a_i, b_i)},
+\end{equation}
+and the supervised silhouette score is $S = \frac{1}{N}\sum_i s_i$, with $S \in [-1,1]$ by construction.
+
+Naively computing all pairwise distances is $\mathcal{O}(N^2)$, so for large $N$ we estimate $S$ on mini-batches or small subsets of the dataset, which is sufficient to monitor trends across layers and epochs.
+
+% -------------------------------------------------------------------------
+\section{Experimental setup}
+\label{sec:exp}
+
+\subsection{Training protocol}
+
+Both CNNs are trained from scratch using cross-entropy loss and the Adam optimizer with learning rate $10^{-3}$ and a small weight decay. Training is performed for 5 epochs for the baseline experiments and 10 epochs for the epoch-wise tracking runs. We use batch size 128 and report standard top-1 accuracy on the train and test splits.
+
+\subsection{Representation extraction}
+
+For layer-wise analysis we:
+\begin{enumerate}
+  \item Train the model to completion.
+  \item Extract the penultimate layer embeddings for the entire test set.
+  \item Compute the three class separation metrics on these embeddings.
+\end{enumerate}
+
+For epoch-wise analysis on MNIST, we:
+\begin{enumerate}
+  \item Re-train the same architecture for 10 epochs.
+  \item After each epoch, evaluate test accuracy.
+  \item Collect embeddings from a fixed subset of batches from both train and test loaders.
+  \item Compute the metrics on these subsets and store their evolution over epochs.
+\end{enumerate}
+
+This yields curves of accuracy vs.\ epoch alongside curves of Fisher ratio, centroid margin ratio, and supervised silhouette on both train and test subsets.
+
+% -------------------------------------------------------------------------
+\section{Results}
+\label{sec:results}
+
+\subsection{Layer-wise separation on the test set}
+
+Table~\ref{tab:test-metrics} reports the metrics computed on the penultimate layer embeddings of the final models for MNIST and CIFAR-10.
+
+\begin{table}[t]
+  \centering
+  \caption{Class separation metrics on test embeddings of the penultimate layer.}
+  \label{tab:test-metrics}
+  \begin{tabular}{lccc}
+    \toprule
+    Dataset & Fisher & Centroid & Silhouette \\
+            & ratio  & margin   & supervised \\
+    \midrule
+    MNIST   & 2.53   & 1.95 & 0.37 \\
+    CIFAR-10 & 0.81  & 0.77 & 0.06 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+As expected, MNIST---a relatively easy digit dataset---shows substantially higher separation scores than CIFAR-10, where classes are more visually diverse and overlapping. This aligns with the intuition that linearly separable structure is stronger for MNIST and weaker for CIFAR-10 \cite{lecun1998mnist,krizhevsky2009learning}.
+
+\subsection{Epoch-wise evolution on MNIST}
+
+Figure~\ref{fig:mnist-curves} summarises the evolution of accuracy and separation metrics across 10 epochs on MNIST. Train and test accuracy quickly rise above 98\% and then plateau.
+
+The three separation metrics on both train and test subsets remain relatively high and closely aligned across epochs. They show only a mild downward trend, but no systematic divergence between train and test, which is consistent with the fact that the model generalises well and does not show strong overfitting on MNIST.
+
+\begin{figure}[t]
+  \centering
+  % Replace the filename with your exported figure from the notebook
+  \includegraphics[width=0.9\columnwidth]{mnist_classsep_curves.pdf}
+  \caption{MNIST: accuracy and class separation metrics (Fisher ratio, centroid margin, supervised silhouette) vs.\ epoch on train and test subsets of the penultimate layer embeddings.}
+  \label{fig:mnist-curves}
+\end{figure}
+
+\subsection{Epoch-wise evolution on CIFAR-10}
+
+For CIFAR-10 we repeat the same protocol. Figure~\ref{fig:cifar-curves} shows that train accuracy continues to increase steadily, while test accuracy improves more slowly and begins to saturate around 75\%.
+
+The class separation metrics reveal more subtle behaviour: train metrics continue to grow or remain high, while test metrics increase only slightly and sometimes even decrease in later epochs. This divergence indicates that the representation geometry is becoming increasingly tailored to the training set, a signature of overfitting that is not immediately obvious from the test accuracy curve alone.
+
+\begin{figure}[t]
+  \centering
+  % Replace the filename with your exported figure from the notebook
+  \includegraphics[width=0.9\columnwidth]{cifar10_classsep_curves.pdf}
+  \caption{CIFAR-10: accuracy and class separation metrics vs.\ epoch on train and test subsets. Train--test divergence in the metrics is more pronounced than in accuracy.}
+  \label{fig:cifar-curves}
+\end{figure}
+
+% -------------------------------------------------------------------------
+\section{Discussion}
+\label{sec:discussion}
+
+\subsection{Usefulness of the metrics}
+
+The experiments support three main observations:
+
+\begin{enumerate}
+  \item All three metrics clearly differentiate between MNIST and CIFAR-10, matching intuition about dataset difficulty.
+
+  \item On MNIST, where the model generalises well, train and test separation scores are similar and relatively stable across epochs.
+
+  \item On CIFAR-10, divergence between train and test separation metrics appears as the model starts to overfit, even when test accuracy still changes only slowly.
+\end{enumerate}
+
+These properties make the metrics promising candidates for debugging and monitoring. For example, a sudden drop in test Fisher ratio or silhouette score could indicate that recent training steps harmed the structure of the representation, even before accuracy visibly degrades. This complements more complex probing approaches that train auxiliary classifiers on hidden layers \cite{alain2017linearprobes}.
+
+\subsection{Limitations}
+
+The proposed metrics also have limitations:
+
+\begin{itemize}
+  \item They rely on Euclidean geometry and second-order statistics; highly non-convex or manifold-shaped clusters may not be captured well. Classical cluster-validity indices such as the Davies--Bouldin score suffer from similar issues \cite{davies1979}.
+
+  \item Class imbalance can bias the scores towards large classes. Simple re-weighting schemes or per-class normalisation may be required in practice.
+
+  \item Computing the supervised silhouette naively has $\mathcal{O}(N^2)$ complexity. We mitigate this with mini-batch approximations, but scalability to very large datasets may require more careful optimisation.
+
+  \item High scores do not guarantee good calibration or robustness; they only describe the geometric separation of classes in a specific layer.
+\end{itemize}
+
+Despite these caveats, the toolbox is lightweight and easy to extend with additional supervised variants of existing clustering indices.
+
+% -------------------------------------------------------------------------
+\section{Conclusion and future work}
+\label{sec:conclusion}
+
+We proposed a small, supervised class-separation toolbox for deep neural networks, consisting of a Fisher-like scatter ratio, a centroid margin ratio, and a supervised silhouette score. The metrics are architecture-agnostic and can be computed on any hidden layer where labels are available.
+
+Applied to MNIST and CIFAR-10 CNNs, the scores correlate with the difficulty of the data set and reveal interesting differences in train vs.\ test behavior across epochs. On CIFAR-10, divergence between train and test separation emerges as the model overfits, providing a complementary diagnostic beyond accuracy alone.
+
+Future work includes applying the toolbox to larger architectures such as ResNets and Transformers \cite{goodfellow2016deep}, studying earlier layers and linear probe performance \cite{alain2017linearprobes}, and exploring extensions to self-supervised or contrastive representation learning where labels are only available for a downstream task.
+
+% -------------------------------------------------------------------------
+\section{GitHub repository and reproducibility}
+\label{sec:github}
+
+All code used in this project --including model definitions, training loops, representation extraction, and metric implementations -- is provided as a Jupyter notebook.
+
+The repository link is:
+
+\medskip
+\noindent\texttt{https://github.com/basharbd/02456-DL-xai-classsep} % <-- replace with your actual link
+\medskip
+
+The notebook is designed to reproduce the main results of this report (up to randomness in training) on a standard CPU-only environment, although using a GPU significantly speeds up training.
+
+% -------------------------------------------------------------------------
+
+
+\bibliographystyle{IEEEbib}
+\bibliography{template}
+
+\newpage
+
+\section*{Declaration of use of generative AI}
+
+
+
+\begin{itemize}
+\item I have used generative AI tools: [\textbf{yes} / no]
+\end{itemize}
+
+List the used generative AI tools:
+\begin{itemize}
+\item OpenAI ChatGPT (GPT--5.1).
+\end{itemize}
+
+
+\begin{description}
+\item[What did you use the tool(s) for?]
+
+\vspace{0.5cm}
+
+Drafting and refining the project description, helping to structure the report, and generating initial versions of Python code for training CNN models, extracting hidden representations, and computing class separation metrics.
+
+\item[At what stage(s) of the process did you use the tool(s)?]
+
+\vspace{0.5cm}
+
+During project planning, while developing and documenting the Jupyter notebook.
+
+\item[How did you use or incorporate the generated output?]
+
+\vspace{0.5cm}
+
+All code snippets  were reviewed, adapted, and debugged manually before being used in experiments. 
+
+All final design decisions, experiments, and interpretations are my own responsibility.
+\end{description}
+
+\subsection*{Contribution}
+\addcontentsline{toc}{subsection}{Contribution}
+
+The project was completed as an individual project, with this arrangement approved by Jes. 
+
+
+\end{document}
